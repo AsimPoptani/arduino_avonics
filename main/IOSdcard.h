@@ -1,3 +1,6 @@
+#ifndef IOSDCARD
+#define IOSDCARD
+
 #include "FS.h"
 #include "SD.h"
 #include "SPI.h"
@@ -10,3 +13,4 @@ void appendFile(fs::FS &fs, const char * path, const char * message);
 void renameFile(fs::FS &fs, const char * path1, const char * path2);
 void deleteFile(fs::FS &fs, const char * path);
 void testFileIO(fs::FS &fs, const char * path);
+#endif

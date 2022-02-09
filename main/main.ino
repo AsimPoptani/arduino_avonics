@@ -3,9 +3,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
+#include "IOSdcard.h"
 #include "Buffer.hpp"
 
-#include "IOSdcard.h"
+
 #include "BMI088.h"
 #include <BMP388_DEV.h>
 
@@ -19,40 +20,69 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
 
 // Handle tasks
-TaskHandle_t ReadPressureTask;
+TaskHandle_t AccelAndGyroTask;
+TaskHandle_t PressureTask;
+TaskHandle_t DisplayTask;
+TaskHandle_t RadioTask;
+
+// Semaphores
+SemaphoreHandle_t SDWriteSemaphore= xSemaphoreCreateMutex();
+SemaphoreHandle_t I2CSemaphore= xSemaphoreCreateMutex();
+SemaphoreHandle_t DisplaySemaphore= xSemaphoreCreateMutex();
+
+// Files
+File pressureFile;
+File accelGyroFile;
 
 // Buffer size for data
-#define BUFFERSIZE 100
+#define BUFFERSIZE 5
 
-// Files to write to
-File pressureFile;
-File accelAndGyroFile;
+
 
 // Hold Pressure data
-struct Pressure
+struct PressureStuct
 {
   int pressure;
   int temperature;
   int altitude;
   unsigned long time;
+  char * (*Convert)(PressureStuct *pressure);
 };
-struct AccelerationAndGyro
+// char * pressureToSting(Pressure *pressure)
+// {
+//     int returnSize=snprintf(NULL,0,"%d,%d,%d,%lu\n",pressure->pressure,pressure->temperature,pressure->altitude,pressure->time);
+//     char * buffer=(char*)malloc(returnSize+1);
+//     snprintf(buffer,returnSize+1,"%d,%d,%d,%lu\n",pressure->pressure,pressure->temperature,pressure->altitude,pressure->time);
+//     return buffer;
+// }
+struct AccelerationAndGyroStruct
 {
-  int ax;
-  int ay;
-  int az;
-  int gx;
-  int gy;
-  int gz;
+  float ax;
+  float ay;
+  float az;
+  float gx;
+  float gy;
+  float gz;
   unsigned long time;
+  char * (*Convert)(AccelerationAndGyroStruct *accelGyro);
 };
+char * accelGyroToSting(AccelerationAndGyroStruct *accelGyro)
+{
+
+
+    int returnSize=snprintf(NULL,0,"%f,%f,%f,%f,%f,%f,%lu\n",accelGyro->ax,accelGyro->ay,accelGyro->az,accelGyro->gx,accelGyro->gy,accelGyro->gz,accelGyro->time);
+    char * buffer=(char*)malloc(returnSize+1);
+    snprintf(buffer,returnSize+1,"%f,%f,%f,%f,%f,%f,%lu\n",accelGyro->ax,accelGyro->ay,accelGyro->az,accelGyro->gx,accelGyro->gy,accelGyro->gz,accelGyro->time);
+
+    return buffer;
+}
 
 // BUFFERS
-typedef Buffer<Pressure> PressureBuffer;
-typedef Buffer<AccelerationAndGyro> AccelAndGyroBuffer;
-PressureBuffer pressureBuffer("/pressure.csv","pressure",BUFFERSIZE);
-AccelAndGyroBuffer accelAndGyroBuffer("/accelAndGyro.csv","accel",BUFFERSIZE);
-
+typedef Buffer<PressureStuct> PressureBuffer;
+typedef Buffer<AccelerationAndGyroStruct> AccelAndGyroBuffer;
+PressureBuffer pressureBuffer("/pressure.csv","pressure",BUFFERSIZE,&SDWriteSemaphore);
+AccelAndGyroBuffer accelAndGyroBuffer("/accelAndGyro.csv","accel",BUFFERSIZE,&SDWriteSemaphore);
+// pressureBuffer=new PressureBuffer("/pressure.csv","pressure",BUFFERSIZE,&SDWriteSemaphore,pressureFile);
 // Devices
 BMP388_DEV bmp388; 
 SPIClass *hspi;
@@ -201,8 +231,9 @@ void Display(void * pvParameters)
     while (1)
     {
       display.clearDisplay();
-      delay(100);
-      display.setTextSize(1);
+      display.display();
+      delay(500);
+      display.setTextSize(2);
       display.setTextColor(WHITE);
       display.setCursor(0,0);
       display.println("Hello World!");
@@ -227,9 +258,9 @@ void Pressure(void *pvParameters)
     float temperature, pressure, altitude;
     if (bmp388.getMeasurements(temperature, pressure, altitude))    // Check if the measurement is complete
     {
-      printf("Temperature: %f\n", temperature);
-      printf("Pressure: %f\n", pressure);
-      printf("Altitude: %f\n", altitude);
+      // printf("Temperature: %f\n", temperature);
+      // printf("Pressure: %f\n", pressure);
+      // printf("Altitude: %f\n", altitude);
     }
     
   }
@@ -239,18 +270,35 @@ void Pressure(void *pvParameters)
 
 void AccelAndGyro(void *pvParameters)
 {
+  delay(1000);
   if (bmi088.isConnection()){
     bmi088.initialize();
     Serial.println("BMI088 connected");
+  }
+  else{
+    Serial.println("BMI088 not connected");
+    while (1) {}
   }
   while (1)
   {
       float x,y,z=0;
       bmi088.getAcceleration(&x,&y,&z);
-      printf("Acceleration: %f, %f, %f\n", x, y, z);
+      // printf("Acceleration: %f, %f, %f\n", x, y, z);
       float xg,yg,zg=0;
       bmi088.getGyroscope(&xg,&yg,&zg);
-      printf("Gyroscope: %f, %f, %f\n", xg, yg, zg);
+      // printf("Gyroscope: %f, %f, %f\n", xg, yg, zg);
+      AccelerationAndGyroStruct accelAndGyro;
+      accelAndGyro.ax = x;
+      accelAndGyro.ay = y;
+      accelAndGyro.az = z;
+      accelAndGyro.gx = xg;
+      accelAndGyro.gy = yg;
+      accelAndGyro.gz = zg;
+      accelAndGyro.time = millis();
+      accelAndGyro.Convert=accelGyroToSting;
+      // add to buffer
+      accelAndGyroBuffer.Push(accelAndGyro);
+
       delay(100);
   }
   
@@ -262,24 +310,34 @@ void setup()
 
   Serial.begin(115200);
   
-  Wire.begin();
+  Wire.begin(21,22);
   
 
-  // SPIClass spi = SPIClass(VSPI);
+  SPIClass spi = SPIClass(VSPI);
+  pinMode(19,INPUT_PULLUP);
+  spi.begin(18,19,23,SDCARDCS);
+
+  if (!SD.begin(SDCARDCS,spi))
+  {
+    Serial.println("initialization failed!");
+    return;
+  }
 
 
-  // if (!SD.begin(SDCARDCS))
-  // {
-  //   Serial.println("initialization failed!");
-  //   return;
-  // }
-  // xTaskCreatePinnedToCore(ReadPressure, "Pressure", 10000, NULL, 1, &ReadPressureTask, 0);
+  
+
+  pressureBuffer.AddFile(&pressureFile,&SD);
+  accelAndGyroBuffer.AddFile(&accelGyroFile,&SD);
+
+  xTaskCreatePinnedToCore(AccelAndGyro, "Accel", 40000, NULL, 1, &AccelAndGyroTask, 0);
+  xTaskCreatePinnedToCore(Pressure, "pressure", 20000, NULL, 1, &PressureTask, 0);
+  xTaskCreatePinnedToCore(Display, "Display", 20000, NULL, 1, &DisplayTask, 0);
   
 }
 void loop()
 {
     
-
+  delay(1000);
     // to make this example readable in the serial monitor
     
   // display.display();
